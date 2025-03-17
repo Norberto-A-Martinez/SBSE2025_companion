@@ -1,0 +1,108 @@
+#%%
+import numpy as np
+import matplotlib.pyplot as plt
+import math
+
+def generate_diverse_ev_profiles(
+    num_vehicles,
+    # Time parameters (clustered)
+    time_clusters=[
+        {"prob": 0.6, "mean_start": 7, "std_start": 1, "mean_finish": 18, "std_finish": 2},  # Day chargers
+        {"prob": 0.4, "mean_start": 18, "std_start": 2, "mean_finish": 23, "std_finish": 1}  # Evening chargers
+    ],
+    # SOC parameters
+    soc_params={"dist": "weibull", "shape": 2, "mean": 15, "std": 5},
+    # EV specs (sampled from distributions)
+    battery_params={"mean": 60, "std": 10, "min": 40},
+    charging_power_params={"mean": 7, "std": 1.5, "min": 3},
+    resolution=1
+):
+    # Cluster assignment
+    cluster_probs = [c["prob"] for c in time_clusters]
+    clusters = np.random.choice(len(time_clusters), size=num_vehicles, p=cluster_probs)
+
+    # Generate start/finish times with cluster-specific parameters
+    start_times, finish_times = [], []
+    for cluster_id in clusters:
+        params = time_clusters[cluster_id]
+        start = np.random.normal(params["mean_start"], params["std_start"])
+        finish = np.random.normal(params["mean_finish"], params["std_finish"])
+        start_times.append(np.mod(start, 24))
+        finish_times.append(np.mod(finish, 24))
+    
+    # Generate SOC with variability
+    if soc_params["dist"] == "weibull":
+        mean_soc = np.clip(np.random.normal(soc_params["mean"], soc_params["std"], num_vehicles), 0, 100)
+        scale = mean_soc / math.gamma(1 + 1/soc_params["shape"])
+        soc = np.random.weibull(soc_params["shape"], num_vehicles) * scale
+    soc = np.clip(soc, 0, 100)
+
+    # Generate EV specifications
+    battery_caps = np.random.normal(battery_params["mean"], battery_params["std"], num_vehicles)
+    battery_caps = np.clip(battery_caps, battery_params["min"], None)
+    
+    charging_powers = np.random.normal(charging_power_params["mean"], charging_power_params["std"], num_vehicles)
+    charging_powers = np.clip(charging_powers, charging_power_params["min"], None)
+
+    # Calculate energy needs
+    energy_needed = (100 - soc) / 100 * battery_caps
+    charging_durations = np.divide(energy_needed, charging_powers, out=np.zeros_like(energy_needed), where=charging_powers!=0)
+
+    # Generate charging profile
+    time_steps = np.arange(0, 24, resolution)
+    profile = np.zeros_like(time_steps, dtype=float)
+    
+    for start, finish, duration, power in zip(start_times, finish_times, charging_durations, charging_powers):
+        if power == 0:
+            continue
+        
+        start_idx = int(start / resolution)
+        available_hours = (finish - start) % 24
+        charge_hours = min(duration, available_hours)
+        
+        # Distribute charging across available time
+        for t in range(int(charge_hours / resolution)):
+            idx = (start_idx + t) % len(profile)
+            profile[idx] += power
+
+    return profile
+
+# Generate multiple scenarios
+np.random.seed(42)
+scenarios = {
+    "weekday_high": generate_diverse_ev_profiles(150),
+    "weekday_low": generate_diverse_ev_profiles(80),
+    "weekend_day": generate_diverse_ev_profiles(
+        100,
+        time_clusters=[
+            {"prob": 0.8, "mean_start": 10, "std_start": 2, "mean_finish": 18, "std_finish": 1},
+            {"prob": 0.2, "mean_start": 14, "std_start": 3, "mean_finish": 22, "std_finish": 2}
+        ],
+        soc_params={"dist": "weibull", "shape": 1.8, "mean": 20, "std": 6}
+    )
+}
+
+h = ['', 2, '', 4, '', 6, '', 8, '', 10, '', 12, '', 14, '', 16, '', 18, '', 20, '', 22, '', 24]
+x_posis1 = range(0, 24, 1)
+
+# Visualization
+fig, ax = plt.subplots(figsize=(7, 3))
+for label, profile in scenarios.items():
+    ax.plot(profile, label=label, alpha=0.7)
+
+# ax.set_title("Diverse EV Charging Scenarios")
+ax.set_xlabel("Hora ($t$)")
+ax.set_ylabel("Demanda de potência ($kW$)")    
+ax.set_xticks(x_posis1)
+ax.set_xticklabels(h)
+ax.legend()
+ax.grid(True)
+plt.tight_layout()
+plt.savefig("results/diverse_ev_profiles.svg")
+plt.show()
+
+# Export scenarios
+time_index = np.arange(24)
+scenario_data = np.column_stack((time_index, *scenarios.values()))
+np.savetxt("dados/ev_scenarios.csv", scenario_data, delimiter=",",
+           header="Hour," + ",".join(scenarios.keys()), comments="")
